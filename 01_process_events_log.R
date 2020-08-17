@@ -6,7 +6,7 @@ library(bupaR)
 library(heuristicsmineR)
 
 # Create DB connection:
-creds <- fromJSON("../credentials.json") # Replace with your own credentials in a JSON object with the relevant keys below:
+creds <- fromJSON("../sharktank_creds.json") # Replace with your own credentials in a JSON object with the relevant keys below:
 con <- dbConnect(Postgres(), 
                  dbname = creds$DB_NAME, 
                  host = creds$DB_HOST, 
@@ -20,9 +20,11 @@ activities_remapping <- readxl::read_excel("resources/unique_activities_remappin
   drop_na()
 
 # Get User Behaviour Events (UBE) dataset from playpen:
-ube_df <- dbGetQuery(con, "SELECT user_id, client_name, event_name, event_timestamp, event_object_id, event_object_description, source
-                               FROM playpen.ub001_user_behaviour_events
-                               WHERE client_name = 'weare'") # We're filtering for only weare data to intuit results from our familiarity with how we use the product. Remove this line to query for all UBE data.
+ube_df <- dbGetQuery(con, "SELECT ube.user_id, client_name, event_name, event_timestamp, event_object_id, event_object_description, source, fur.user_role
+                               FROM playpen.ub001_user_behaviour_events ube
+                           LEFT JOIN core.filter_user_roles fur
+                               ON ube.user_id = fur.user_id
+                           WHERE client_name = 'weare'") # We're filtering for only weare data to intuit results from our familiarity with how we use the product. Remove this line to query for all UBE data.
 
 # Get distinct list of pendo pages events:
 pendo_events_mapping <- ube_df %>% 
@@ -62,21 +64,28 @@ events_selection <- ube_df %>%
   ungroup(user_id) %>% 
   filter(activity_repeat == FALSE) %>% # Remove repeated events.
   select(-c(time_since_last, new_session)) %>% # Remove the columns "time_since_last" and "new_session".
-  mutate(user_instance_id = paste0(user_id, "_", recoded_activity, "_", session_id)) %>% # Create variable "user_instance_id" by concatenating "user_id", "recoded_activity", "session_id" to use as "activity_instance_id" in events log object below.
+  mutate(activity_instance_id = paste0(user_id, "_", recoded_activity, "_", session_id)) %>% # Create variable "activity_instance_id" by concatenating "user_id", "recoded_activity", "session_id" to use as "activity_instance_id" in events log object below.
   mutate(user_session_id = paste0(user_id, "_", session_id)) %>% # Create variable "user_session_id" by concatenating "user_id" and "session_id" to use as "case_id" in events log object below.
   arrange(user_id, event_timestamp) # Sort by user_id and event_timestamp once again. Should not be necessary, but doesn't hurt to be extra sure.
 
 
 # Create Events Log Object: as per http://bupar.net/creating_eventlogs.html
 events_selection_log <- events_selection %>% 
-  select(user_id, user_instance_id, user_session_id, session_id, recoded_activity, event_timestamp, event_object_description) %>% 
+  select(user_id, activity_instance_id, user_session_id, session_id, recoded_activity, event_timestamp, event_object_description) %>% 
   mutate(status = "complete") %>% 
   eventlog(case_id = "user_session_id",
            activity_id = "recoded_activity", 
-           activity_instance_id = "user_instance_id", 
+           activity_instance_id = "activity_instance_id", 
            lifecycle_id = "status", 
            timestamp = "event_timestamp", 
            resource_id = "event_object_description")
+
+user_roles_df <- events_selection %>% 
+  select(user_id, user_role) %>% 
+  distinct()
+
+events_selection_log <- events_selection_log %>% 
+  left_join(user_roles_df, by = "user_id")
 
 # Housecleaning:
 rm(events_selection) 
@@ -99,6 +108,14 @@ causal_net(events_selection_log %>% filter(!grepl("events_", .$recoded_activity)
 
 # Causal net between events, for a single user (Francis in this example):
 causal_net(events_selection_log %>% filter(user_id == "1be68175_97c3_41c3_b2b5_3050bb1eb57b"), threshold = .8) %>% 
+  render_causal_net()
+
+# Causal net between events, for a single user role:
+causal_net(events_selection_log %>% filter(user_role == "pm"), threshold = .8) %>% 
+  render_causal_net()
+
+# Causal net between events, for a single user role:
+causal_net(events_selection_log %>% filter(user_role == "stakeholder"), threshold = .8) %>% 
   render_causal_net()
 
 #########################################
@@ -203,6 +220,9 @@ log %>%
 log %>% 
   trace_length("log") %>%
   plot
+
+# compare summary of log dataset to summary of events dataset:
+log %>% summary()
 
 # Precedence Analysis. Given the large amount of distinct events, the tables are more informative and useful than the plots.
 precedence_with_events <- precedence_matrix(log, type = "absolute") # Calculate precedence matrix.
